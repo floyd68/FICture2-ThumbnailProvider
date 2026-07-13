@@ -11,7 +11,9 @@
 #include <wrl/client.h>
 #include <atomic>
 #include <array>
+#include <format>
 #include <new>
+#include <string>
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -124,11 +126,10 @@ namespace
             return E_FAIL;
         }
 
-        wchar_t keyPath[256] {};
-        swprintf_s(keyPath, L"CLSID\\%s", clsidStr);
+        const std::wstring keyPath = std::format(L"CLSID\\{}", clsidStr);
 
         HKEY clsidKey = nullptr;
-        if (RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath, 0, nullptr, 0, KEY_WRITE, nullptr, &clsidKey, nullptr) != ERROR_SUCCESS)
+        if (RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &clsidKey, nullptr) != ERROR_SUCCESS)
         {
             return E_FAIL;
         }
@@ -150,10 +151,9 @@ namespace
         }
         RegCloseKey(clsidKey);
 
-        wchar_t extKey[128] {};
-        swprintf_s(extKey, L".dds\\ShellEx\\%s", kThumbnailProviderKey);
+        const std::wstring extKey = std::format(L".dds\\ShellEx\\{}", kThumbnailProviderKey);
         HKEY shellExKey = nullptr;
-        if (RegCreateKeyExW(HKEY_CLASSES_ROOT, extKey, 0, nullptr, 0, KEY_WRITE, nullptr, &shellExKey, nullptr) != ERROR_SUCCESS)
+        if (RegCreateKeyExW(HKEY_CLASSES_ROOT, extKey.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &shellExKey, nullptr) != ERROR_SUCCESS)
         {
             return E_FAIL;
         }
@@ -185,13 +185,11 @@ namespace
             return E_FAIL;
         }
 
-        wchar_t extKey[128] {};
-        swprintf_s(extKey, L".dds\\ShellEx\\%s", kThumbnailProviderKey);
-        RegDeleteTreeW(HKEY_CLASSES_ROOT, extKey);
+        const std::wstring extKey = std::format(L".dds\\ShellEx\\{}", kThumbnailProviderKey);
+        RegDeleteTreeW(HKEY_CLASSES_ROOT, extKey.c_str());
 
-        wchar_t clsidKey[256] {};
-        swprintf_s(clsidKey, L"CLSID\\%s", clsidStr);
-        RegDeleteTreeW(HKEY_CLASSES_ROOT, clsidKey);
+        const std::wstring clsidKey = std::format(L"CLSID\\{}", clsidStr);
+        RegDeleteTreeW(HKEY_CLASSES_ROOT, clsidKey.c_str());
 
         // Remove from Approved Shell Extensions
         HKEY approvedKey = nullptr;
