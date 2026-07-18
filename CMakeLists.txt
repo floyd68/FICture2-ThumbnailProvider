@@ -3,10 +3,12 @@ add_library(ThumbnailProvider SHARED)
 target_sources(ThumbnailProvider PRIVATE
     ThumbnailProvider.cpp
     ThumbnailProvider.def
+    ../ImageAlphaPresentation.cpp
 )
 
 target_include_directories(ThumbnailProvider PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../ImageCore
     ${CMAKE_CURRENT_SOURCE_DIR}/../external/DirectXTex/DirectXTex
 )

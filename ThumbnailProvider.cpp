@@ -1,6 +1,7 @@
 #include "ThumbnailProvider.h"
 
 #include "DecodeTypes.h"
+#include "ImageAlphaPresentation.h"
 #include "ImageCore.h"
 #include "ImageDecodeDispatcher.h"
 #include "ImageFormatDetector.h"
@@ -11,9 +12,12 @@
 #include <wrl/client.h>
 #include <atomic>
 #include <array>
+#include <cstdint>
+#include <cstring>
 #include <format>
 #include <new>
 #include <string>
+#include <vector>
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -218,6 +222,14 @@ namespace
             return E_FAIL;
         }
 
+        const ImageAlphaInfo alpha = AlphaInfoFromDecodedImage(image);
+        const ImageCore::AlphaUsage usage = ResolveAlphaUsage(alpha);
+        const std::vector<std::uint8_t> presentation = BuildBgra8Presentation(image, usage);
+        if (presentation.empty())
+        {
+            return E_FAIL;
+        }
+
         BITMAPINFO bmi {};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth = static_cast<LONG>(width);
@@ -237,12 +249,13 @@ namespace
             return E_FAIL;
         }
 
-        const uint8_t* src = image.blocks->data();
+        const uint8_t* src = presentation.data();
         auto* dst = static_cast<uint8_t*>(bits);
         const uint32_t rowBytes = width * 4u;
+        const uint32_t pitch = image.rowPitchBytes != 0 ? image.rowPitchBytes : rowBytes;
         for (uint32_t y = 0; y < height; ++y)
         {
-            memcpy(dst + (rowBytes * y), src + (image.rowPitchBytes * y), rowBytes);
+            memcpy(dst + (rowBytes * y), src + (pitch * y), rowBytes);
         }
 
         *outBitmap = hbm;
