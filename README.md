@@ -30,8 +30,8 @@ Windows Explorer thumbnail handler for DDS texture files.
 ### Architecture
 
 1. Windows Explorer requests a thumbnail via `IInitializeWithStream::Initialize`
-2. File data is read into memory from the provided stream
-3. `IThumbnailProvider::GetThumbnail` decodes the image using ImageCore
+2. File data is read into memory from the provided stream (up to 100 MB, in as many reads as the stream needs)
+3. `IThumbnailProvider::GetThumbnail` decodes the image using ImageCore and releases ImageCore's per-thread WIC factory before returning; DirectXTex's process-global WIC factory is the only COM object the decode path keeps
 4. The decoded image is converted to an HBITMAP for Explorer
 
 ## Building
@@ -57,6 +57,18 @@ Windows Explorer thumbnail handler for DDS texture files.
    - Build the project
 
 4. The DLL will be output to `x64\Release\ThumbnailProvider.dll`
+
+### Tests
+
+The tests build only inside the FICture2 tree, with the provider enabled (`FICTURE2_BUILD_THUMBNAIL_PROVIDER`, on by default):
+
+```cmd
+cmake -S . -B build -A x64 -DTHUMBNAILPROVIDER_BUILD_TESTS=ON
+cmake --build build --config Debug --target ThumbnailProviderTests
+ctest --test-dir build -C Debug -R ThumbnailProvider --output-on-failure
+```
+
+`ThumbnailProviderTests` links the provider's OBJECT library (`ThumbnailProviderCore`, the same objects as the DLL) and creates the provider directly, without registering it.
 
 ## Installation
 
