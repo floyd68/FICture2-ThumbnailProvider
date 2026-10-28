@@ -8,13 +8,13 @@
 #include "ImageRequest.h"
 
 #include <shlwapi.h>
-#include <wincodec.h>
-#include <wrl/client.h>
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <mutex>
 #include <new>
 #include <string>
 #include <utility>
@@ -35,6 +35,24 @@ namespace
 
     // Input-size limit for Initialize.
     constexpr ULONGLONG kMaxFileBytes = 100ull * 1024ull * 1024ull;
+
+    // Releases ImageCore's per-thread COM objects (its cached WIC factory) when
+    // GetThumbnail returns, so none stays on the host's (Explorer's) thread
+    // until thread exit, possibly after the host's CoUninitialize. The only COM
+    // object the decode path keeps is DirectXTex's process-global WIC factory,
+    // created once and owned by DirectXTex.
+    class ThreadResourceGuard final
+    {
+    public:
+        ThreadResourceGuard() = default;
+        ThreadResourceGuard(const ThreadResourceGuard&) = delete;
+        ThreadResourceGuard& operator=(const ThreadResourceGuard&) = delete;
+
+        ~ThreadResourceGuard()
+        {
+            ImageCore::ImageDecodeDispatcher::ReleaseThreadResources();
+        }
+    };
 
     class ClassFactory final : public IClassFactory
     {
@@ -383,27 +401,21 @@ IFACEMETHODIMP Ficture2ThumbnailProvider::GetThumbnail(UINT cx, HBITMAP* phbmp, 
     {
         return E_POINTER;
     }
+    *phbmp = nullptr;
+    *pdwAlpha = WTSAT_UNKNOWN;
 
     if (m_fileData.empty())
     {
         return E_FAIL;
     }
 
+    // Every return from here on runs after decoding may have started.
+    const ThreadResourceGuard threadResourceGuard;
+
     std::call_once(g_decoderInitFlag, []()
     {
         ImageCore::RegisterBuiltInDecoders();
     });
-
-    Microsoft::WRL::ComPtr<IWICImagingFactory> wicFactory;
-    HRESULT hr = CoCreateInstance(
-        CLSID_WICImagingFactory,
-        nullptr,
-        CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(&wicFactory));
-    if (FAILED(hr))
-    {
-        return hr;
-    }
 
     ImageCore::ImageRequest request {};
     request.source = L"thumbnail.dds";
@@ -417,14 +429,14 @@ IFACEMETHODIMP Ficture2ThumbnailProvider::GetThumbnail(UINT cx, HBITMAP* phbmp, 
     input.header = std::span<const uint8_t>(m_fileData.data(), std::min<size_t>(m_fileData.size(), 512));
 
     ImageCore::ImageDecodeDispatcher dispatcher {};
-    ImageCore::PipelineResult result = dispatcher.Decode(request, wicFactory.Get(), input);
+    ImageCore::PipelineResult result = dispatcher.Decode(request, input);
     if (FAILED(result.hr))
     {
         return result.hr;
     }
 
     HBITMAP hbm = nullptr;
-    hr = CreateBitmapFromDecodedImage(result.image, &hbm);
+    const HRESULT hr = CreateBitmapFromDecodedImage(result.image, &hbm);
     if (FAILED(hr))
     {
         return hr;
