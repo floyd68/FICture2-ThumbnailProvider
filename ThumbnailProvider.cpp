@@ -8,15 +8,16 @@
 #include "ImageRequest.h"
 
 #include <shlwapi.h>
-#include <wincodec.h>
-#include <wrl/client.h>
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <mutex>
 #include <new>
 #include <string>
+#include <utility>
 #include <vector>
 
 #pragma comment(lib, "shlwapi.lib")
@@ -31,6 +32,27 @@ namespace
     std::atomic<long> g_moduleRefCount { 0 };
     HMODULE g_moduleHandle = nullptr;
     std::once_flag g_decoderInitFlag;
+
+    // Input-size limit for Initialize.
+    constexpr ULONGLONG kMaxFileBytes = 100ull * 1024ull * 1024ull;
+
+    // Releases ImageCore's per-thread COM objects (its cached WIC factory) when
+    // GetThumbnail returns, so none stays on the host's (Explorer's) thread
+    // until thread exit, possibly after the host's CoUninitialize. The only COM
+    // object the decode path keeps is DirectXTex's process-global WIC factory,
+    // created once and owned by DirectXTex.
+    class ThreadResourceGuard final
+    {
+    public:
+        ThreadResourceGuard() = default;
+        ThreadResourceGuard(const ThreadResourceGuard&) = delete;
+        ThreadResourceGuard& operator=(const ThreadResourceGuard&) = delete;
+
+        ~ThreadResourceGuard()
+        {
+            ImageCore::ImageDecodeDispatcher::ReleaseThreadResources();
+        }
+    };
 
     class ClassFactory final : public IClassFactory
     {
@@ -322,6 +344,8 @@ IFACEMETHODIMP Ficture2ThumbnailProvider::Initialize(IStream* stream, DWORD grfM
         return E_INVALIDARG;
     }
 
+    m_fileData.clear();
+
     // Get stream size
     STATSTG stat {};
     HRESULT hr = stream->Stat(&stat, STATFLAG_NONAME);
@@ -331,27 +355,43 @@ IFACEMETHODIMP Ficture2ThumbnailProvider::Initialize(IStream* stream, DWORD grfM
     }
 
     const ULONGLONG fileSize = stat.cbSize.QuadPart;
-    if (fileSize == 0 || fileSize > 100 * 1024 * 1024) // Max 100MB
+    if (fileSize == 0 || fileSize > kMaxFileBytes)
     {
         return E_FAIL;
     }
 
-    // Read stream data
-    m_fileData.resize(static_cast<size_t>(fileSize));
-    ULONG bytesRead = 0;
-    hr = stream->Read(m_fileData.data(), static_cast<ULONG>(fileSize), &bytesRead);
-    if (FAILED(hr))
+    // Read stream data. IStream::Read may legally return fewer bytes than
+    // requested (S_OK or S_FALSE), so keep reading until the reported size is
+    // consumed. Every pass either advances or stops, so the loop is bounded by
+    // the size; a stream that ends early is truncated.
+    std::vector<uint8_t> data(static_cast<size_t>(fileSize));
+    size_t total = 0;
+    while (total < data.size())
     {
-        m_fileData.clear();
-        return hr;
+        const ULONG request = static_cast<ULONG>(data.size() - total);
+        ULONG bytesRead = 0;
+        hr = stream->Read(data.data() + total, request, &bytesRead);
+        if (FAILED(hr))
+        {
+            return hr;
+        }
+        if (bytesRead > request)
+        {
+            return E_UNEXPECTED;
+        }
+        if (bytesRead == 0)
+        {
+            break;
+        }
+        total += bytesRead;
     }
 
-    if (bytesRead != fileSize)
+    if (total != data.size())
     {
-        m_fileData.clear();
-        return E_FAIL;
+        return HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
     }
 
+    m_fileData = std::move(data);
     return S_OK;
 }
 
@@ -361,27 +401,21 @@ IFACEMETHODIMP Ficture2ThumbnailProvider::GetThumbnail(UINT cx, HBITMAP* phbmp, 
     {
         return E_POINTER;
     }
+    *phbmp = nullptr;
+    *pdwAlpha = WTSAT_UNKNOWN;
 
     if (m_fileData.empty())
     {
         return E_FAIL;
     }
 
+    // Every return from here on runs after decoding may have started.
+    const ThreadResourceGuard threadResourceGuard;
+
     std::call_once(g_decoderInitFlag, []()
     {
         ImageCore::RegisterBuiltInDecoders();
     });
-
-    Microsoft::WRL::ComPtr<IWICImagingFactory> wicFactory;
-    HRESULT hr = CoCreateInstance(
-        CLSID_WICImagingFactory,
-        nullptr,
-        CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(&wicFactory));
-    if (FAILED(hr))
-    {
-        return hr;
-    }
 
     ImageCore::ImageRequest request {};
     request.source = L"thumbnail.dds";
@@ -395,14 +429,14 @@ IFACEMETHODIMP Ficture2ThumbnailProvider::GetThumbnail(UINT cx, HBITMAP* phbmp, 
     input.header = std::span<const uint8_t>(m_fileData.data(), std::min<size_t>(m_fileData.size(), 512));
 
     ImageCore::ImageDecodeDispatcher dispatcher {};
-    ImageCore::PipelineResult result = dispatcher.Decode(request, wicFactory.Get(), input);
+    ImageCore::PipelineResult result = dispatcher.Decode(request, input);
     if (FAILED(result.hr))
     {
         return result.hr;
     }
 
     HBITMAP hbm = nullptr;
-    hr = CreateBitmapFromDecodedImage(result.image, &hbm);
+    const HRESULT hr = CreateBitmapFromDecodedImage(result.image, &hbm);
     if (FAILED(hr))
     {
         return hr;
