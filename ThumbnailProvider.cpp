@@ -17,6 +17,7 @@
 #include <format>
 #include <new>
 #include <string>
+#include <utility>
 #include <vector>
 
 #pragma comment(lib, "shlwapi.lib")
@@ -31,6 +32,9 @@ namespace
     std::atomic<long> g_moduleRefCount { 0 };
     HMODULE g_moduleHandle = nullptr;
     std::once_flag g_decoderInitFlag;
+
+    // Input-size limit for Initialize.
+    constexpr ULONGLONG kMaxFileBytes = 100ull * 1024ull * 1024ull;
 
     class ClassFactory final : public IClassFactory
     {
@@ -322,6 +326,8 @@ IFACEMETHODIMP Ficture2ThumbnailProvider::Initialize(IStream* stream, DWORD grfM
         return E_INVALIDARG;
     }
 
+    m_fileData.clear();
+
     // Get stream size
     STATSTG stat {};
     HRESULT hr = stream->Stat(&stat, STATFLAG_NONAME);
@@ -331,27 +337,43 @@ IFACEMETHODIMP Ficture2ThumbnailProvider::Initialize(IStream* stream, DWORD grfM
     }
 
     const ULONGLONG fileSize = stat.cbSize.QuadPart;
-    if (fileSize == 0 || fileSize > 100 * 1024 * 1024) // Max 100MB
+    if (fileSize == 0 || fileSize > kMaxFileBytes)
     {
         return E_FAIL;
     }
 
-    // Read stream data
-    m_fileData.resize(static_cast<size_t>(fileSize));
-    ULONG bytesRead = 0;
-    hr = stream->Read(m_fileData.data(), static_cast<ULONG>(fileSize), &bytesRead);
-    if (FAILED(hr))
+    // Read stream data. IStream::Read may legally return fewer bytes than
+    // requested (S_OK or S_FALSE), so keep reading until the reported size is
+    // consumed. Every pass either advances or stops, so the loop is bounded by
+    // the size; a stream that ends early is truncated.
+    std::vector<uint8_t> data(static_cast<size_t>(fileSize));
+    size_t total = 0;
+    while (total < data.size())
     {
-        m_fileData.clear();
-        return hr;
+        const ULONG request = static_cast<ULONG>(data.size() - total);
+        ULONG bytesRead = 0;
+        hr = stream->Read(data.data() + total, request, &bytesRead);
+        if (FAILED(hr))
+        {
+            return hr;
+        }
+        if (bytesRead > request)
+        {
+            return E_UNEXPECTED;
+        }
+        if (bytesRead == 0)
+        {
+            break;
+        }
+        total += bytesRead;
     }
 
-    if (bytesRead != fileSize)
+    if (total != data.size())
     {
-        m_fileData.clear();
-        return E_FAIL;
+        return HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
     }
 
+    m_fileData = std::move(data);
     return S_OK;
 }
 
